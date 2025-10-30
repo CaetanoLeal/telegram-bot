@@ -156,13 +156,60 @@ app.post("/confirmar-codigo", async (req, res) => {
 
 /* -------------------- Enviar mensagem -------------------- */
 app.post("/send-message", async (req, res) => {
-  const { nome, number, message } = req.body;
+  const { nome, number, userId, message } = req.body;
   const session = sessions[nome];
   if (!session) return res.status(400).json({ error: "Sessão não encontrada" });
 
   try {
-    await session.client.sendMessage(number, { message });
-    await sendWebhook(session.webhook, { acao: "mensagem_enviada", para: number, mensagem: message, data: new Date().toISOString() });
+    let entity;
+
+    if (number) {
+      // 🔹 Caso tenha número, usa o método tradicional
+      const formattedNumber = number.startsWith("+") ? number : `+${number}`;
+
+      try {
+        entity = await session.client.getEntity(formattedNumber);
+      } catch {
+        // Caso não exista, importa o contato
+        const result = await session.client.invoke(
+          new Api.contacts.ImportContacts({
+            contacts: [
+              new Api.InputPhoneContact({
+                clientId: Date.now(),
+                phone: formattedNumber,
+                firstName: "Contato",
+                lastName: "",
+              }),
+            ],
+          })
+        );
+        entity = result.users[0];
+      }
+
+    } else if (userId) {
+      // 🔹 Caso tenha apenas o ID do usuário
+      entity = new Api.InputPeerUser({
+        userId: BigInt(userId),
+        accessHash: (await session.client.getEntity(userId)).accessHash, // busca o hash do user
+      });
+
+    } else {
+      return res.status(400).json({
+        error: "É necessário informar 'number' ou 'userId' no corpo da requisição.",
+      });
+    }
+
+    // 🟩 Envia a mensagem
+    await session.client.sendMessage(entity, { message });
+
+    // 🔹 Envia webhook (se configurado)
+    await sendWebhook(session.webhook, {
+      acao: "mensagem_enviada",
+      para: number || userId,
+      mensagem: message,
+      data: new Date().toISOString(),
+    });
+
     res.json({ status: true, msg: "Mensagem enviada com sucesso" });
   } catch (err) {
     console.error("❌ Erro ao enviar mensagem:", err);
