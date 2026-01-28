@@ -154,17 +154,46 @@ app.post("/confirmar-codigo", async (req, res) => {
   }
 })();
 
+/* -------------------- Função Auxiliar -------------------- */
+
+function buildInlineKeyboard(buttons) {
+  if (!buttons || !Array.isArray(buttons) || buttons.length === 0) return [];
+
+  return buttons.map((row) => 
+    new Api.KeyboardButtonRow({
+      buttons: row.map((btn) => {
+        if (btn.url) {
+          return new Api.KeyboardButtonUrl({
+            text: btn.text,
+            url: btn.url,
+          });
+        } else {
+          return new Api.KeyboardButtonCallback({
+            text: btn.text,
+            data: Buffer.from(btn.callback_data || btn.text, "utf-8"),
+          });
+        }
+      }),
+    })
+  );
+}
+
+
 /* -------------------- Enviar mensagem -------------------- */
+
 app.post("/send-message", async (req, res) => {
   const { nome, number, userId, message } = req.body;
   const session = sessions[nome];
-  if (!session) return res.status(400).json({ error: "Sessão não encontrada" });
+
+  if (!session) {
+    return res.status(400).json({ error: "Sessão não encontrada" });
+  }
 
   try {
     let entity;
 
     if (number) {
-      // 🔹 Caso tenha número, usa o método tradicional
+      // 🔹 Caso tenha número, formata corretamente
       const formattedNumber = number.startsWith("+") ? number : `+${number}`;
 
       try {
@@ -183,16 +212,17 @@ app.post("/send-message", async (req, res) => {
             ],
           })
         );
+
         entity = result.users[0];
       }
-
     } else if (userId) {
       // 🔹 Caso tenha apenas o ID do usuário
-      entity = new Api.InputPeerUser({
-        userId: BigInt(userId),
-        accessHash: (await session.client.getEntity(userId)).accessHash, // busca o hash do user
-      });
+      const userEntity = await session.client.getEntity(userId);
 
+      entity = new Api.InputPeerUser({
+        userId: BigInt(userEntity.id),
+        accessHash: userEntity.accessHash,
+      });
     } else {
       return res.status(400).json({
         error: "É necessário informar 'number' ou 'userId' no corpo da requisição.",
@@ -217,6 +247,7 @@ app.post("/send-message", async (req, res) => {
   }
 });
 
+
 /* -------------------- Status da instância -------------------- */
 app.get("/status/:nome", (req, res) => {
   const { nome } = req.params;
@@ -235,6 +266,7 @@ app.get("/status/:nome", (req, res) => {
 app.get("/received-messages", (req, res) => {
   res.json({ total: messages.length, mensagens: messages });
 });
+
 
 /* -------------------- Iniciar servidor -------------------- */
 app.listen(PORT, () => console.log(`🚀 Servidor rodando em http://localhost:${PORT}`));
