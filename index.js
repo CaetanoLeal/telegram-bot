@@ -1,3 +1,4 @@
+//telegram-bot/index.js
 const { Api, TelegramClient } = require("telegram");
 const { NewMessage } = require("telegram/events");
 const { StringSession } = require("telegram/sessions");
@@ -100,11 +101,26 @@ app.post("/confirmar-codigo", async (req, res) => {
 
     // Webhook de sucesso
     await sendWebhook(webhook, {
-      acao: "nova_instancia",
+      event: "instance.connected",
+      provider: "telegram",
       nome,
-      status: "conectado",
-      stringSession: sessionString,
+      session_string: sessionString,
+      phoneNumber,
+      webhook,
+      ds_auth_path: path.join(SESSIONS_DIR, `${nome}.session`),
+      createdAt: new Date().toISOString()
     });
+
+    // Escutar desconexões
+    client.addEventHandler(async (update) => {
+      if (update.className === "UpdateConnectionState" && update.state === "closed") {
+        await sendWebhook(webhook, {
+          event: "instance.disconnected",
+          provider: "telegram",
+          nome
+        })
+      }
+    })
 
     // Escutar mensagens
     client.addEventHandler(
@@ -148,6 +164,17 @@ app.post("/confirmar-codigo", async (req, res) => {
 
     const client = new TelegramClient(new StringSession(sessionData), apiId, apiHash, { connectionRetries: 5 });
     await client.connect();
+
+    await sendWebhook(process.env.API_WEBHOOK_URL, {
+      event: "instance.connected",
+      provider: "telegram",
+      nome,
+      session_string: sessionData,
+      phoneNumber: null,
+      webhook: null,
+      ds_auth_path: path.join(SESSIONS_DIR, `${nome}.session`),
+      createdAt: new Date().toISOString()
+    });
 
     sessions[nome] = { client, webhook: null, isConfirmed: true };
     console.log(`♻️ Sessão restaurada: ${nome}`);
