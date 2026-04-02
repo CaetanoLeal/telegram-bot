@@ -128,10 +128,23 @@ app.post("/confirmar-codigo", async (req, res) => {
         const message = event.message;
         if (!message) return;
 
+        message.instance = {
+          name: nome
+        };
+        
         messages.push(message); // Armazena a mensagem completa localmente
 
         // Envia o objeto completo para a API
-        await sendWebhook(webhook, message);
+        await sendWebhook(webhook, {
+          event: "message.received",
+          provider: "telegram",
+          nome,
+          instance: {
+            name: nome
+          },
+          message,
+          fromMe: false
+        });
       },
       new NewMessage({})
     );
@@ -257,15 +270,40 @@ app.post("/send-message", async (req, res) => {
     }
 
     // 🟩 Envia a mensagem
-    await session.client.sendMessage(entity, { message });
+    const result = await session.client.sendMessage(entity, { message });
 
-    // 🔹 Envia webhook (se configurado)
-    await sendWebhook(session.webhook, {
-      acao: "mensagem_enviada",
-      para: number || userId,
-      mensagem: message,
-      data: new Date().toISOString(),
-    });
+    // 🔹 Envia webhook
+    const payload = {
+      event: "message.sent",
+      provider: "telegram",
+
+      nome,
+
+      instance: {
+        name: nome
+      },
+
+      telegram: {
+        messageId: result.id,
+        peerId: result.peerId,
+        date: result.date,
+      },
+
+      message: {
+        type: "text",
+        text: message,
+        raw: result
+      },
+
+      fromMe: true,
+      timestamp: result.date ? result.date * 1000 : Date.now()
+    };
+
+    console.log("\n========== PAYLOAD TELEGRAM SENDMESSAGE ==========");
+    console.log(JSON.stringify(payload, null, 2));
+    console.log("=================================================\n");
+
+    await sendWebhook(session.webhook, payload);
 
     res.json({ status: true, msg: "Mensagem enviada com sucesso" });
   } catch (err) {
