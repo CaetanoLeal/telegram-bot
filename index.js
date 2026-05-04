@@ -1,4 +1,3 @@
-//telegram-bot/index.js
 const { Api, TelegramClient } = require("telegram");
 const { NewMessage } = require("telegram/events");
 const { StringSession } = require("telegram/sessions");
@@ -11,76 +10,92 @@ const path = require("path");
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.use("/photos", express.static(PHOTOS_DIR));
 
 const PORT = process.env.PORT || 3002;
 
-// Credenciais Telegram
-const apiId = 20637774;
-const apiHash = "030aaf9610ff135dd84423742007daf4";
+// 🔐 NÃO deixe isso hardcoded em produção
+const apiId = process.env.TELEGRAM_API_ID || 20637774;
+const apiHash = process.env.TELEGRAM_API_HASH || "030aaf9610ff135dd84423742007daf4";
 
-// Diretório de sessões
+// 📁 Pastas
 const SESSIONS_DIR = path.join(__dirname, "sessions");
-if (!fs.existsSync(SESSIONS_DIR)) fs.mkdirSync(SESSIONS_DIR, { recursive: true });
+const PHOTOS_DIR = path.join(__dirname, "photos");
 
-// Sessões em memória
+if (!fs.existsSync(SESSIONS_DIR)) fs.mkdirSync(SESSIONS_DIR, { recursive: true });
+if (!fs.existsSync(PHOTOS_DIR)) fs.mkdirSync(PHOTOS_DIR, { recursive: true });
+
+// 🧠 Memória
 const sessions = {};
-const tempLogins = {}; // guarda { phoneNumber: { client, phoneCodeHash } }
+const tempLogins = {};
 const messages = [];
 
-/* -------------------- Funções utilitárias -------------------- */
+/* ================= UTIL ================= */
 
 async function sendWebhook(url, payload) {
   if (!url) return;
   try {
-    await axios.post(url, payload, { headers: { "Content-Type": "application/json" }, timeout: 10000 });
-    console.log("✅ Webhook enviado:", payload.acao || "mensagem");
+    await axios.post(url, payload, {
+      headers: { "Content-Type": "application/json" },
+      timeout: 10000,
+    });
+    console.log("✅ Webhook enviado:", payload.event);
   } catch (err) {
-    console.error("❌ Erro ao enviar webhook:", err.message);
+    console.error("❌ Webhook erro:", err.message);
   }
 }
 
 function saveSession(nome, stringSession) {
   const file = path.join(SESSIONS_DIR, `${nome}.session`);
   fs.writeFileSync(file, stringSession, "utf8");
-  console.log("💾 Sessão salva:", file);
 }
 
 function readSession(nome) {
   const file = path.join(SESSIONS_DIR, `${nome}.session`);
-  if (fs.existsSync(file)) return fs.readFileSync(file, "utf8");
-  return null;
+  return fs.existsSync(file) ? fs.readFileSync(file, "utf8") : null;
 }
 
-/* -------------------- Login em duas etapas -------------------- */
+/* ================= LOGIN ================= */
 
-// Etapa 1: iniciar login (envia código para o Telegram)
 app.post("/iniciar-login", async (req, res) => {
   const { nome, webhook, phoneNumber } = req.body;
-  if (!nome || !phoneNumber) return res.status(400).json({ error: "nome e phoneNumber são obrigatórios" });
+
+  if (!nome || !phoneNumber) {
+    return res.status(400).json({ error: "nome e phoneNumber são obrigatórios" });
+  }
 
   try {
-    const stringSession = new StringSession("");
-    const client = new TelegramClient(stringSession, apiId, apiHash, { connectionRetries: 5 });
+    const client = new TelegramClient(new StringSession(""), apiId, apiHash, {
+      connectionRetries: 5,
+    });
+
     await client.connect();
 
-    console.log(`📞 Enviando código para ${phoneNumber}...`);
     const result = await client.sendCode({ apiId, apiHash }, phoneNumber);
 
-    tempLogins[phoneNumber] = { client, phoneCodeHash: result.phoneCodeHash, nome, webhook };
-    res.json({ status: "aguardando_codigo", phoneNumber });
+    tempLogins[phoneNumber] = {
+      client,
+      phoneCodeHash: result.phoneCodeHash,
+      nome,
+      webhook,
+    };
+
+    res.json({ status: "aguardando_codigo" });
   } catch (err) {
-    console.error("❌ Erro iniciar login:", err);
-    res.status(500).json({ error: "Falha ao enviar código" });
+    console.error(err);
+    res.status(500).json({ error: "Erro ao enviar código" });
   }
 });
 
-// Etapa 2: confirmar código recebido
 app.post("/confirmar-codigo", async (req, res) => {
   const { phoneNumber, phoneCode, password } = req.body;
-  const loginData = tempLogins[phoneNumber];
-  if (!loginData) return res.status(400).json({ error: "Sessão de login não encontrada" });
+  const login = tempLogins[phoneNumber];
 
-  const { client, phoneCodeHash, nome, webhook } = loginData;
+  if (!login) {
+    return res.status(400).json({ error: "Login não encontrado" });
+  }
+
+  const { client, phoneCodeHash, nome, webhook } = login;
 
   try {
     await client.invoke(
@@ -91,135 +106,152 @@ app.post("/confirmar-codigo", async (req, res) => {
       })
     );
 
-    console.log("✅ Login Telegram bem-sucedido!");
-
     const sessionString = client.session.save();
     saveSession(nome, sessionString);
 
-    delete tempLogins[phoneNumber];
     sessions[nome] = { client, webhook, isConfirmed: true };
+    delete tempLogins[phoneNumber];
 
-    // Webhook de sucesso
     await sendWebhook(webhook, {
       event: "instance.connected",
       provider: "telegram",
       nome,
       session_string: sessionString,
       phoneNumber,
-      webhook,
       ds_auth_path: path.join(SESSIONS_DIR, `${nome}.session`),
-      createdAt: new Date().toISOString()
     });
 
-    // Escutar desconexões
-    client.addEventHandler(async (update) => {
-      if (update.className === "UpdateConnectionState" && update.state === "closed") {
-        await sendWebhook(webhook, {
-          event: "instance.disconnected",
-          provider: "telegram",
-          nome
-        })
-      }
-    })
+    startListeners(client, nome, webhook);
 
-    // Escutar mensagens
-    client.addEventHandler(
-      async (event) => {
-        const message = event.message;
-        if (!message) return;
+    res.json({ status: "conectado" });
 
-        message.instance = {
-          name: nome
-        };
-        
-        messages.push(message); // Armazena a mensagem completa localmente
-
-        // Envia o objeto completo para a API
-        await sendWebhook(webhook, {
-          event: "message.received",
-          provider: "telegram",
-          nome,
-          instance: {
-            name: nome
-          },
-          message,
-          fromMe: false
-        });
-      },
-      new NewMessage({})
-    );
-
-    res.json({ status: "conectado", nome, sessionString });
   } catch (err) {
-    if (err.error_message === "SESSION_PASSWORD_NEEDED" || err.errorMessage === "SESSION_PASSWORD_NEEDED") {
+
+    // 🔐 2FA
+    if (err.errorMessage === "SESSION_PASSWORD_NEEDED") {
       try {
         await client.invoke(new Api.auth.CheckPassword({ password }));
+
         const sessionString = client.session.save();
         saveSession(nome, sessionString);
-        res.json({ status: "conectado_com_password", nome });
-      } catch (e) {
-        res.status(401).json({ error: "Senha incorreta" });
+
+        sessions[nome] = { client, webhook, isConfirmed: true };
+
+        startListeners(client, nome, webhook);
+
+        return res.json({ status: "conectado_com_password" });
+      } catch {
+        return res.status(401).json({ error: "Senha incorreta" });
       }
-    } else {
-      console.error("❌ Erro confirmar código:", err);
-      res.status(500).json({ error: "Falha ao confirmar código" });
     }
+
+    console.error(err);
+    res.status(500).json({ error: "Erro no login" });
   }
 });
 
-/* -------------------- Recarregar sessões salvas -------------------- */
+/* ================= LISTENERS ================= */
+
+function startListeners(client, nome, webhook) {
+
+  // 🔌 desconexão
+  client.addEventHandler(async (update) => {
+    if (update.className === "UpdateConnectionState" && update.state === "closed") {
+      await sendWebhook(webhook, {
+        event: "instance.disconnected",
+        provider: "telegram",
+        nome,
+      });
+    }
+  });
+
+  // 💬 mensagens
+  client.addEventHandler(async (event) => {
+    const message = event.message;
+    if (!message) return;
+
+    let sender = null;
+    let photoPath = null;
+
+    try {
+      if (message.senderId) {
+        sender = await client.getEntity(message.senderId);
+      }
+
+      if (sender) {
+        const photo = await client.downloadProfilePhoto(sender);
+
+        if (photo) {
+          const fileName = `${sender.id}.jpg`;
+          const fullPath = path.join(PHOTOS_DIR, fileName);
+
+          fs.writeFileSync(fullPath, photo);
+
+          // ⚠️ URL pública
+          photoPath = `http://SEU_IP:3002/photos/${fileName}`;
+          fs.writeFileSync(photoPath, photo);
+        }
+      }
+    } catch (err) {
+      console.warn("⚠️ erro ao obter sender:", err.message);
+    }
+
+    const contact = sender
+      ? {
+          id: sender.id?.toString(),
+          firstName: sender.firstName,
+          lastName: sender.lastName,
+          username: sender.username,
+          phone: sender.phone,
+          photo: photoPath,
+        }
+      : null;
+
+    const payload = {
+      event: "message.received",
+      provider: "telegram",
+      nome,
+      instance: { name: nome },
+      message,
+      fromMe: message.out || false,
+      contact,
+    };
+
+    messages.push(payload);
+
+    await sendWebhook(webhook, payload);
+  }, new NewMessage({}));
+}
+
+/* ================= RESTORE ================= */
+
 (async () => {
   const files = fs.readdirSync(SESSIONS_DIR);
+
   for (const file of files) {
     const nome = path.basename(file, ".session");
     const sessionData = readSession(nome);
+
     if (!sessionData) continue;
 
-    const client = new TelegramClient(new StringSession(sessionData), apiId, apiHash, { connectionRetries: 5 });
+    const client = new TelegramClient(
+      new StringSession(sessionData),
+      apiId,
+      apiHash,
+      { connectionRetries: 5 }
+    );
+
     await client.connect();
 
-    await sendWebhook(process.env.API_WEBHOOK_URL, {
-      event: "instance.connected",
-      provider: "telegram",
-      nome,
-      session_string: sessionData,
-      phoneNumber: null,
-      webhook: null,
-      ds_auth_path: path.join(SESSIONS_DIR, `${nome}.session`),
-      createdAt: new Date().toISOString()
-    });
-
     sessions[nome] = { client, webhook: null, isConfirmed: true };
-    console.log(`♻️ Sessão restaurada: ${nome}`);
+
+    startListeners(client, nome, null);
+
+    console.log("♻️ Restaurado:", nome);
   }
 })();
 
-/* -------------------- Função Auxiliar -------------------- */
-
-function buildInlineKeyboard(buttons) {
-  if (!buttons || !Array.isArray(buttons) || buttons.length === 0) return [];
-
-  return buttons.map((row) => 
-    new Api.KeyboardButtonRow({
-      buttons: row.map((btn) => {
-        if (btn.url) {
-          return new Api.KeyboardButtonUrl({
-            text: btn.text,
-            url: btn.url,
-          });
-        } else {
-          return new Api.KeyboardButtonCallback({
-            text: btn.text,
-            data: Buffer.from(btn.callback_data || btn.text, "utf-8"),
-          });
-        }
-      }),
-    })
-  );
-}
-
-
-/* -------------------- Enviar mensagem -------------------- */
+/* ================= SEND MESSAGE ================= */
 
 app.post("/send-message", async (req, res) => {
   const { nome, number, userId, message } = req.body;
@@ -233,21 +265,18 @@ app.post("/send-message", async (req, res) => {
     let entity;
 
     if (number) {
-      // 🔹 Caso tenha número, formata corretamente
-      const formattedNumber = number.startsWith("+") ? number : `+${number}`;
+      const formatted = number.startsWith("+") ? number : `+${number}`;
 
       try {
-        entity = await session.client.getEntity(formattedNumber);
+        entity = await session.client.getEntity(formatted);
       } catch {
-        // Caso não exista, importa o contato
         const result = await session.client.invoke(
           new Api.contacts.ImportContacts({
             contacts: [
               new Api.InputPhoneContact({
                 clientId: Date.now(),
-                phone: formattedNumber,
+                phone: formatted,
                 firstName: "Contato",
-                lastName: "",
               }),
             ],
           })
@@ -255,83 +284,60 @@ app.post("/send-message", async (req, res) => {
 
         entity = result.users[0];
       }
+
     } else if (userId) {
-      // 🔹 Caso tenha apenas o ID do usuário
-      const userEntity = await session.client.getEntity(userId);
+
+      const user = await session.client.getEntity(userId);
 
       entity = new Api.InputPeerUser({
-        userId: BigInt(userEntity.id),
-        accessHash: userEntity.accessHash,
+        userId: BigInt(user.id),
+        accessHash: user.accessHash,
       });
+
     } else {
-      return res.status(400).json({
-        error: "É necessário informar 'number' ou 'userId' no corpo da requisição.",
-      });
+      return res.status(400).json({ error: "Informe number ou userId" });
     }
 
-    // 🟩 Envia a mensagem
     const result = await session.client.sendMessage(entity, { message });
 
-    // 🔹 Envia webhook
-    const payload = {
+    await sendWebhook(session.webhook, {
       event: "message.sent",
       provider: "telegram",
-
       nome,
-
-      instance: {
-        name: nome
-      },
-
       telegram: {
         messageId: result.id,
         peerId: result.peerId,
         date: result.date,
       },
-
-      message: {
-        type: "text",
-        text: message,
-        raw: result
-      },
-
+      message: { text: message },
       fromMe: true,
-      timestamp: result.date ? result.date * 1000 : Date.now()
-    };
+    });
 
-    console.log("\n========== PAYLOAD TELEGRAM SENDMESSAGE ==========");
-    console.log(JSON.stringify(payload, null, 2));
-    console.log("=================================================\n");
+    res.json({ success: true });
 
-    await sendWebhook(session.webhook, payload);
-
-    res.json({ status: true, msg: "Mensagem enviada com sucesso" });
   } catch (err) {
-    console.error("❌ Erro ao enviar mensagem:", err);
+    console.error(err);
     res.status(500).json({ error: err.message });
   }
 });
 
+/* ================= STATUS ================= */
 
-/* -------------------- Status da instância -------------------- */
 app.get("/status/:nome", (req, res) => {
-  const { nome } = req.params;
-  const session = sessions[nome];
-  if (!session) return res.status(404).json({ error: "Sessão não encontrada" });
+  const session = sessions[req.params.nome];
+
+  if (!session) {
+    return res.status(404).json({ error: "Sessão não encontrada" });
+  }
 
   res.json({
-    nome,
     conectado: !!session.client.connected,
     webhook: session.webhook,
-    isConfirmed: session.isConfirmed,
   });
 });
 
-/* -------------------- Listar mensagens -------------------- */
-app.get("/received-messages", (req, res) => {
-  res.json({ total: messages.length, mensagens: messages });
+/* ================= SERVER ================= */
+
+app.listen(PORT, () => {
+  console.log(`🚀 Telegram bot rodando na porta ${PORT}`);
 });
-
-
-/* -------------------- Iniciar servidor -------------------- */
-app.listen(PORT, () => console.log(`🚀 Servidor rodando em http://localhost:${PORT}`));
