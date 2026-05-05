@@ -8,19 +8,21 @@ const fs = require("fs");
 const path = require("path");
 
 const app = express();
+
+const SESSIONS_DIR = path.join(__dirname, "sessions");
+const PHOTOS_DIR = path.join(__dirname, "photos");
+
 app.use(cors());
 app.use(express.json());
 app.use("/photos", express.static(PHOTOS_DIR));
 
+
 const PORT = process.env.PORT || 3002;
 
-// 🔐 NÃO deixe isso hardcoded em produção
+
 const apiId = process.env.TELEGRAM_API_ID || 20637774;
 const apiHash = process.env.TELEGRAM_API_HASH || "030aaf9610ff135dd84423742007daf4";
 
-// 📁 Pastas
-const SESSIONS_DIR = path.join(__dirname, "sessions");
-const PHOTOS_DIR = path.join(__dirname, "photos");
 
 if (!fs.existsSync(SESSIONS_DIR)) fs.mkdirSync(SESSIONS_DIR, { recursive: true });
 if (!fs.existsSync(PHOTOS_DIR)) fs.mkdirSync(PHOTOS_DIR, { recursive: true });
@@ -183,13 +185,12 @@ function startListeners(client, nome, webhook) {
 
         if (photo) {
           const fileName = `${sender.id}.jpg`;
+          
+          // ⚠️ URL pública
           const fullPath = path.join(PHOTOS_DIR, fileName);
-
           fs.writeFileSync(fullPath, photo);
 
-          // ⚠️ URL pública
           photoPath = `http://SEU_IP:3002/photos/${fileName}`;
-          fs.writeFileSync(photoPath, photo);
         }
       }
     } catch (err) {
