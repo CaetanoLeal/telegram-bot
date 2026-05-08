@@ -27,7 +27,7 @@ const apiHash = process.env.TELEGRAM_API_HASH || "030aaf9610ff135dd84423742007da
 if (!fs.existsSync(SESSIONS_DIR)) fs.mkdirSync(SESSIONS_DIR, { recursive: true });
 if (!fs.existsSync(PHOTOS_DIR)) fs.mkdirSync(PHOTOS_DIR, { recursive: true });
 
-// 🧠 Memória
+// Memória
 const sessions = {};
 const tempLogins = {};
 const messages = [];
@@ -71,7 +71,9 @@ app.post("/iniciar-login", async (req, res) => {
       connectionRetries: 5,
     });
 
-    await client.connect();
+    if (!client.connected) {
+      await client.connect();
+    }
 
     const result = await client.sendCode({ apiId, apiHash }, phoneNumber);
 
@@ -111,8 +113,20 @@ app.post("/confirmar-codigo", async (req, res) => {
     const sessionString = client.session.save();
     saveSession(nome, sessionString);
 
-    sessions[nome] = { client, webhook, isConfirmed: true };
     delete tempLogins[phoneNumber];
+
+      // remove cliente antigo se existir
+      if (sessions[nome]?.client) {
+        try {
+          await sessions[nome].client.destroy();
+        } catch {}
+      }
+
+      sessions[nome] = {
+        client,
+        webhook,
+        isConfirmed: true,
+      };
 
     await sendWebhook(webhook, {
       event: "instance.connected",
@@ -156,9 +170,15 @@ app.post("/confirmar-codigo", async (req, res) => {
 
 function startListeners(client, nome, webhook) {
 
-  // 🔌 desconexão
+  // remove listeners antigos
+  client.removeEventHandler(handler)
+
+  // desconexão
   client.addEventHandler(async (update) => {
-    if (update.className === "UpdateConnectionState" && update.state === "closed") {
+    if (
+      update.className === "UpdateConnectionState" &&
+      update.state === "closed"
+    ) {
       await sendWebhook(webhook, {
         event: "instance.disconnected",
         provider: "telegram",
@@ -167,61 +187,66 @@ function startListeners(client, nome, webhook) {
     }
   });
 
-  // 💬 mensagens
-  client.addEventHandler(async (event) => {
-    const message = event.message;
-    if (!message) return;
+  // mensagens
+  client.addEventHandler(
+    async (event) => {
+      const message = event.message;
 
-    let sender = null;
-    let photoPath = null;
+      if (!message) return;
 
-    try {
-      if (message.senderId) {
-        sender = await client.getEntity(message.senderId);
+      let sender = null;
+      let photoPath = null;
+
+      try {
+        if (message.senderId) {
+          sender = await client.getEntity(message.senderId);
+        }
+
+        if (sender) {
+          const photo = await client.downloadProfilePhoto(sender);
+
+          if (photo) {
+            const fileName = `${sender.id}.jpg`;
+
+            const fullPath = path.join(PHOTOS_DIR, fileName);
+
+            fs.writeFileSync(fullPath, photo);
+
+            photoPath = `http://SEU_IP:3002/photos/${fileName}`;
+          }
+        }
+      } catch (err) {
+        console.warn("⚠️ erro ao obter sender:", err.message);
       }
 
-      if (sender) {
-        const photo = await client.downloadProfilePhoto(sender);
+      const contact = sender
+        ? {
+            id: sender.id?.toString(),
+            firstName: sender.firstName,
+            lastName: sender.lastName,
+            username: sender.username,
+            phone: sender.phone,
+            photo: photoPath,
+          }
+        : null;
 
-        if (photo) {
-          const fileName = `${sender.id}.jpg`;
-          
-          // ⚠️ URL pública
-          const fullPath = path.join(PHOTOS_DIR, fileName);
-          fs.writeFileSync(fullPath, photo);
+      const payload = {
+        event: "message.received",
+        provider: "telegram",
+        nome,
+        instance: { name: nome },
+        message,
+        fromMe: message.out || false,
+        contact,
+      };
 
-          photoPath = `http://SEU_IP:3002/photos/${fileName}`;
-        }
-      }
-    } catch (err) {
-      console.warn("⚠️ erro ao obter sender:", err.message);
-    }
+      messages.push(payload);
 
-    const contact = sender
-      ? {
-          id: sender.id?.toString(),
-          firstName: sender.firstName,
-          lastName: sender.lastName,
-          username: sender.username,
-          phone: sender.phone,
-          photo: photoPath,
-        }
-      : null;
+      await sendWebhook(webhook, payload);
 
-    const payload = {
-      event: "message.received",
-      provider: "telegram",
-      nome,
-      instance: { name: nome },
-      message,
-      fromMe: message.out || false,
-      contact,
-    };
-
-    messages.push(payload);
-
-    await sendWebhook(webhook, payload);
-  }, new NewMessage({}));
+    },
+    new NewMessage({})
+  );
 }
 
 /* ================= RESTORE ================= */
@@ -242,15 +267,57 @@ function startListeners(client, nome, webhook) {
       { connectionRetries: 5 }
     );
 
-    await client.connect();
+    try {
 
-    sessions[nome] = { client, webhook: null, isConfirmed: true };
+      // evita duplicar sessão
+      if (sessions[nome]?.client) {
+        console.log(`⚠️ Sessão já ativa: ${nome}`);
+        continue;
+      }
 
-    startListeners(client, nome, null);
+      if (!client.connected) {
+        await client.connect();
+      }
 
-    console.log("♻️ Restaurado:", nome);
+      sessions[nome] = {
+        client,
+        webhook: null,
+        isConfirmed: true,
+      };
+
+      startListeners(client, nome, null);
+
+      console.log("♻️ Restaurado:", nome);
+
+    } catch (err) {
+
+      console.error(`❌ Erro restaurando ${nome}:`, err.message);
+
+      // sessão corrompida ou duplicada
+      if (
+        err.errorMessage === "AUTH_KEY_DUPLICATED" ||
+        err.message?.includes("AUTH_KEY_DUPLICATED")
+      ) {
+
+        console.log(`🗑️ Removendo sessão inválida: ${nome}`);
+
+        fs.unlinkSync(path.join(SESSIONS_DIR, file));
+      }
+    }
   }
 })();
+
+    process.on("SIGINT", async () => {
+    console.log("🔌 Encerrando Telegram clients...");
+
+    for (const nome in sessions) {
+      try {
+        await sessions[nome].client.destroy();
+      } catch {}
+    }
+
+    process.exit(0);
+  });
 
 /* ================= SEND MESSAGE ================= */
 
