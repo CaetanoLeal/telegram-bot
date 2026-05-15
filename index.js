@@ -1,3 +1,5 @@
+require('dotenv').config()
+
 const { Api, TelegramClient } = require("telegram");
 const { NewMessage } = require("telegram/events");
 const { StringSession } = require("telegram/sessions");
@@ -9,19 +11,19 @@ const path = require("path");
 
 const app = express();
 
-const SESSIONS_DIR = path.join(__dirname, "sessions");
-const PHOTOS_DIR = path.join(__dirname, "photos");
+const SESSIONS_DIR = path.join(__dirname, process.env.SESSIONS_DIR);
+const PHOTOS_DIR = path.join(__dirname, process.env.PHOTOS_DIR);
 
 app.use(cors());
 app.use(express.json());
 app.use("/photos", express.static(PHOTOS_DIR));
 
 
-const PORT = process.env.PORT || 3002;
+const PORT = process.env.PORT ? Number(process.env.PORT) : null;
+const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
 
-
-const apiId = process.env.TELEGRAM_API_ID || 20637774;
-const apiHash = process.env.TELEGRAM_API_HASH || "030aaf9610ff135dd84423742007daf4";
+const apiId = process.env.TELEGRAM_API_ID ? Number(process.env.TELEGRAM_API_ID) : null;
+const apiHash = process.env.TELEGRAM_API_HASH;
 
 
 if (!fs.existsSync(SESSIONS_DIR)) fs.mkdirSync(SESSIONS_DIR, { recursive: true });
@@ -212,7 +214,7 @@ function startListeners(client, nome, webhook) {
 
             fs.writeFileSync(fullPath, photo);
 
-            photoPath = `http://SEU_IP:3002/photos/${fileName}`;
+            photoPath = `${BASE_URL.replace(/\/$/, '')}/photos/${fileName}`;
           }
         }
       } catch (err) {
